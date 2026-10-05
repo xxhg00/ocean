@@ -28,6 +28,8 @@ PANEL="${PANEL%/}"
 
 if [ "$(id -u)" != "0" ]; then echo "请用 root 运行"; exit 1; fi
 if [ -z "$PANEL" ]; then echo "缺少面板地址：请加上 -p http://面板地址:端口"; exit 1; fi
+_H="${PANEL#*://}"; _H="${_H%%[/:]*}"
+if echo "$_H" | grep -Eq '^[0-9.]+$|^\[?[0-9a-fA-F:]+\]?$' && echo "$_H" | grep -q '[.:]' && ! echo "$_H" | grep -q '[g-zG-Z]'; then echo "面板地址不能是纯 IP，请改用域名（如 https://panel.example.com）"; exit 1; fi
 if [ -z "$KEY" ]; then echo "缺少对接密钥：请加上 -k 你的对接密钥"; exit 1; fi
 if ! command -v systemctl >/dev/null 2>&1; then echo "需要 systemd"; exit 1; fi
 
@@ -62,7 +64,7 @@ if [ -z "$GOT" ]; then
   for m in $MIRRORS; do
     m="${m%/}"
     echo "尝试镜像 $m ..."
-    if curl -fsSL --connect-timeout 8 --max-time 300 "$m/$BIN" -o "$TMP" 2>/dev/null \
+    if curl -fsSL --connect-timeout 8 --max-time 300 --speed-time 15 --speed-limit 20000 "$m/$BIN" -o "$TMP" 2>/dev/null \
        && curl -fsSL --connect-timeout 8 --max-time 30 "$m/SHA256SUMS" -o "$TMP.sums" 2>/dev/null \
        && sha_ok "$TMP" "$TMP.sums"; then
       GOT="镜像 $m"; break
@@ -73,7 +75,7 @@ fi
 # 3. 面板
 if [ -z "$GOT" ]; then
   echo "尝试从面板下载 ..."
-  if curl -fsSL --connect-timeout 10 --max-time 600 "$PANEL/agent/bin/linux-$ARCH" -o "$TMP"; then GOT="面板 $PANEL"; fi
+  if curl -fsSL --connect-timeout 10 --max-time 600 --speed-time 20 --speed-limit 10000 "$PANEL/agent/bin/linux-$ARCH" -o "$TMP"; then GOT="面板 $PANEL"; fi
 fi
 if [ -z "$GOT" ]; then
   echo "没能拿到节点程序：本地没有离线文件，镜像和面板都下载失败。"
