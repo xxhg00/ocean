@@ -1,4 +1,4 @@
-ocean 节点安装包 v0.6.12（通用，不含面板地址和密钥）
+ocean 节点安装包 v0.6.13（通用，不含面板地址和密钥）
 
 一、当镜像用（推荐）
 1. 新建一个公开仓库，把本目录里的 4 个文件原样放到仓库根目录：install.sh、oceand-linux-amd64、oceand-linux-arm64、SHA256SUMS（VERSION 可选）。
