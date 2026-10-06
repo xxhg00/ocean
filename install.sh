@@ -14,12 +14,13 @@ set -uo pipefail
 PANEL=""
 KEY="${OCEAN_KEY:-}"
 NAME="${OCEAN_NAME:-$(hostname)}"
+NAME_SET="${OCEAN_NAME:+1}"
 MIRRORS="${OCEAN_MIRRORS:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     -p|--panel) PANEL="${2:-}"; shift 2 ;;
     -k|--key) KEY="${2:-}"; shift 2 ;;
-    -n|--name) NAME="${2:-}"; shift 2 ;;
+    -n|--name) NAME="${2:-}"; NAME_SET=1; shift 2 ;;
     -m|--mirrors) MIRRORS="${2:-}"; shift 2 ;;
     *) echo "未知参数: $1（可用: -p 面板地址  -k 对接密钥  -n 节点名  -m 镜像地址）"; exit 1 ;;
   esac
@@ -27,6 +28,15 @@ done
 PANEL="${PANEL%/}"
 
 if [ "$(id -u)" != "0" ]; then echo "请用 root 运行"; exit 1; fi
+# 没用 -n 指定节点名、又是在终端里手动运行时：问一下节点名（直接回车 = 用主机名；60 秒没输入也用主机名）
+if [ -z "$NAME_SET" ] && { true </dev/tty; } 2>/dev/null; then
+  printf '节点名称（直接回车使用 "%s"）: ' "$NAME" >/dev/tty
+  _IN=""
+  read -r -t 60 _IN </dev/tty || true
+  _IN="$(printf '%s' "$_IN" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [ -n "$_IN" ] && NAME="$_IN"
+  echo "节点名称: $NAME" >/dev/tty
+fi
 if [ -z "$PANEL" ]; then echo "缺少面板地址：请加上 -p http://面板地址:端口"; exit 1; fi
 _H="${PANEL#*://}"; _H="${_H%%[/:]*}"
 if echo "$_H" | grep -Eq '^[0-9.]+$|^\[?[0-9a-fA-F:]+\]?$' && echo "$_H" | grep -q '[.:]' && ! echo "$_H" | grep -q '[g-zG-Z]'; then echo "面板地址不能是纯 IP，请改用域名（如 https://panel.example.com）"; exit 1; fi
