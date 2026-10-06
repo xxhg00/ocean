@@ -90,6 +90,50 @@ if ! curl -sS -m 10 -o /dev/null "$PANEL" 2>/dev/null; then
   exit 1
 fi
 
+# ---- 可选：优化系统参数 / 安装常用工具（环境变量 OPTIMIZE=1 INSTALL_TOOLS=1 可免交互；设成 0 表示不做）
+can_ask() { { : </dev/tty; } 2>/dev/null; }
+ask_yn() { # $1 提示  → 输入 y 返回 0
+  can_ask || return 1
+  local a=""; read -r -p "$1" a </dev/tty || return 1
+  [ "$a" = "y" ] || [ "$a" = "Y" ]
+}
+if [ -z "${OPTIMIZE:-}" ]; then ask_yn "是否优化系统参数（开启 BBR / 调大缓冲区，输入 y 优化）: " && OPTIMIZE=1; fi
+if [ -z "${INSTALL_TOOLS:-}" ]; then ask_yn "是否安装常用工具（curl wget htop mtr iperf3 等，输入 y 安装）: " && INSTALL_TOOLS=1; fi
+
+if [ "${OPTIMIZE:-0}" = "1" ]; then
+  echo "正在优化系统参数 ..."
+  modprobe tcp_bbr 2>/dev/null || true
+  CC=cubic
+  if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then CC=bbr; fi
+  cat > /etc/sysctl.d/99-oceand.conf <<SYS
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = $CC
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_notsent_lowat = 131072
+net.core.somaxconn = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.core.netdev_max_backlog = 16384
+net.ipv4.ip_local_port_range = 10240 65535
+net.ipv4.tcp_tw_reuse = 1
+SYS
+  sysctl --system >/dev/null 2>&1 || true
+  [ "$CC" = "bbr" ] || echo "  提示：这台机器的内核没有 BBR（需要 4.9 以上内核），已保持 $CC。"
+fi
+if [ "${INSTALL_TOOLS:-0}" = "1" ]; then
+  echo "正在安装常用工具 ..."
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl wget vim htop iperf3 mtr-tiny dnsutils net-tools unzip tcpdump >/dev/null 2>&1 || echo "  部分工具安装失败，可以稍后手动安装。"
+  else
+    echo "  不是 Debian / Ubuntu，跳过。"
+  fi
+fi
+
 systemctl stop oceand 2>/dev/null || true
 install -m 755 "$TMP" /usr/local/bin/oceand
 mkdir -p /etc/oceand
@@ -132,3 +176,7 @@ chmod 755 /opt/oceand.uninstall.sh
 echo "安装成功。查看日志: journalctl -fu oceand"
 echo "如需卸载，请运行以下命令："
 echo "bash /opt/oceand.uninstall.sh"
+echo
+echo "tcp_congestion_control:  $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)   default_qdisc: $(sysctl -n net.core.default_qdisc 2>/dev/null)"
+BBRV="$(modinfo tcp_bbr 2>/dev/null | awk -F': *' '/^version/{print $2}')"
+[ -n "$BBRV" ] && echo "tcp_bbr 模块版本: $BBRV（1 = BBRv1；BBRv3 需要 XanMod 等带 BBRv3 的内核）"
