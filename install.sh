@@ -138,7 +138,14 @@ fi
 if [ "${INSTALL_TOOLS:-0}" = "1" ]; then
   echo "正在安装常用工具 ..."
   if command -v apt-get >/dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl wget vim htop iperf3 mtr-tiny dnsutils net-tools unzip tcpdump >/dev/null 2>&1 || echo "  部分工具安装失败，可以稍后手动安装。"
+    export DEBIAN_FRONTEND=noninteractive
+    # 新开的机器软件源列表常常是空的/过期的，先更新；再逐个安装，一个失败不影响其他
+    apt-get update -qq >/dev/null 2>&1 || apt-get update -qq >/dev/null 2>&1 || true
+    FAILED=""
+    for p in curl wget vim htop iperf3 mtr-tiny dnsutils net-tools unzip tcpdump; do
+      apt-get install -y -qq "$p" >/dev/null 2>&1 || apt-get install -y -qq "$p" >/dev/null 2>&1 || FAILED="$FAILED $p"
+    done
+    [ -n "$FAILED" ] && echo "  这些工具没装上：$FAILED （可以稍后手动 apt-get install）"
   else
     echo "  不是 Debian / Ubuntu，跳过。"
   fi
