@@ -41,7 +41,11 @@ if [ -z "$PANEL" ]; then echo "缺少面板地址：请加上 -p http://面板�
 _H="${PANEL#*://}"; _H="${_H%%[/:]*}"
 if echo "$_H" | grep -Eq '^[0-9.]+$|^\[?[0-9a-fA-F:]+\]?$' && echo "$_H" | grep -q '[.:]' && ! echo "$_H" | grep -q '[g-zG-Z]'; then echo "面板地址不能是纯 IP，请改用域名（如 https://panel.example.com）"; exit 1; fi
 if [ -z "$KEY" ]; then echo "缺少对接密钥：请加上 -k 你的对接密钥"; exit 1; fi
-if ! command -v systemctl >/dev/null 2>&1; then echo "需要 systemd"; exit 1; fi
+# 支持 systemd（绝大多数 Linux）和 OpenRC（Alpine）
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then INIT=systemd
+elif command -v rc-service >/dev/null 2>&1 && [ -x /sbin/openrc-run ]; then INIT=openrc
+elif command -v systemctl >/dev/null 2>&1; then INIT=systemd
+else echo "需要 systemd 或 OpenRC（Alpine）"; exit 1; fi
 
 case "$(uname -m)" in
   x86_64|amd64) ARCH=amd64 ;;
@@ -132,7 +136,7 @@ net.core.netdev_max_backlog = 16384
 net.ipv4.ip_local_port_range = 10240 65535
 net.ipv4.tcp_tw_reuse = 1
 SYS
-  sysctl --system >/dev/null 2>&1 || true
+  sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-oceand.conf >/dev/null 2>&1 || true
   [ "$CC" = "bbr" ] || echo "  提示：这台机器的内核没有 BBR（需要 4.9 以上内核），已保持 $CC。"
 fi
 if [ "${INSTALL_TOOLS:-0}" = "1" ]; then
@@ -146,12 +150,19 @@ if [ "${INSTALL_TOOLS:-0}" = "1" ]; then
       apt-get install -y -qq "$p" >/dev/null 2>&1 || apt-get install -y -qq "$p" >/dev/null 2>&1 || FAILED="$FAILED $p"
     done
     [ -n "$FAILED" ] && echo "  这些工具没装上：$FAILED （可以稍后手动 apt-get install）"
+  elif command -v apk >/dev/null 2>&1; then
+    apk update -q >/dev/null 2>&1 || true
+    FAILED=""
+    for p in curl wget vim htop iperf3 mtr bind-tools net-tools unzip tcpdump; do
+      apk add -q --no-cache "$p" >/dev/null 2>&1 || apk add -q --no-cache "$p" >/dev/null 2>&1 || FAILED="$FAILED $p"
+    done
+    [ -n "$FAILED" ] && echo "  这些工具没装上：$FAILED （可以稍后手动 apk add）"
   else
-    echo "  不是 Debian / Ubuntu，跳过。"
+    echo "  不是 Debian / Ubuntu / Alpine，跳过。"
   fi
 fi
 
-systemctl stop oceand 2>/dev/null || true
+if [ "$INIT" = openrc ]; then rc-service oceand stop >/dev/null 2>&1 || true; else systemctl stop oceand 2>/dev/null || true; fi
 install -m 755 "$TMP" /usr/local/bin/oceand
 mkdir -p /etc/oceand
 chmod 700 /etc/oceand
@@ -160,6 +171,34 @@ if ! /usr/local/bin/oceand register --panel "$PANEL" --key "$KEY" --name "$NAME"
   exit 1
 fi
 
+if [ "$INIT" = openrc ]; then
+cat > /etc/init.d/oceand <<'RC'
+#!/sbin/openrc-run
+name="oceand"
+description="ocean node service"
+command="/usr/local/bin/oceand"
+command_args="run"
+supervisor="supervise-daemon"
+respawn_delay=3
+respawn_max=0
+output_log="/var/log/oceand.log"
+error_log="/var/log/oceand.log"
+export OCEAN_DIR=/etc/oceand
+
+depend() {
+	want net
+	after firewall
+}
+
+start_pre() {
+	# 日志超过 5MB 就清空，免得一直变大
+	if [ -f /var/log/oceand.log ] && [ "$(wc -c < /var/log/oceand.log)" -gt 5242880 ]; then : > /var/log/oceand.log; fi
+}
+RC
+chmod 755 /etc/init.d/oceand
+rc-update add oceand default >/dev/null 2>&1
+rc-service oceand restart >/dev/null 2>&1 || rc-service oceand start
+else
 cat > /etc/systemd/system/oceand.service <<'UNIT'
 [Unit]
 Description=ocean node service
@@ -180,17 +219,26 @@ UNIT
 systemctl daemon-reload
 systemctl enable oceand >/dev/null 2>&1
 systemctl restart oceand
+fi
 cat > /opt/oceand.uninstall.sh <<'UNI'
 #!/usr/bin/env bash
-systemctl disable --now oceand 2>/dev/null || true
-rm -f /etc/systemd/system/oceand.service /usr/local/bin/oceand /usr/local/bin/oceand.new
+if [ -f /etc/init.d/oceand ] && command -v rc-service >/dev/null 2>&1; then
+  rc-service oceand stop 2>/dev/null || true
+  rc-update del oceand default 2>/dev/null || true
+  rm -f /etc/init.d/oceand /var/log/oceand.log
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now oceand 2>/dev/null || true
+  rm -f /etc/systemd/system/oceand.service
+  systemctl daemon-reload 2>/dev/null || true
+fi
+rm -f /usr/local/bin/oceand /usr/local/bin/oceand.new
 rm -rf /etc/oceand
-systemctl daemon-reload
 rm -f /opt/oceand.uninstall.sh
 echo "ocean 已卸载"
 UNI
 chmod 755 /opt/oceand.uninstall.sh
-echo "安装成功。查看日志: journalctl -fu oceand"
+if [ -f /etc/init.d/oceand ] && ! [ -d /run/systemd/system ]; then echo "安装成功。查看日志: tail -f /var/log/oceand.log"; else echo "安装成功。查看日志: journalctl -fu oceand"; fi
 echo "如需卸载，请运行以下命令："
 echo "bash /opt/oceand.uninstall.sh"
 echo
