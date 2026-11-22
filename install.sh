@@ -2,7 +2,10 @@
 # ocean 节点安装脚本（通用：不含面板地址和密钥，全部用参数传入）
 #
 # 用法：
-#   bash install.sh -p 面板地址 -k 对接密钥 [-n 节点名] [-m "镜像地址1 镜像地址2"]
+#   bash install.sh -p 面板地址 -k 对接密钥 [-n 节点名] [-m "镜像地址1 镜像地址2"] [--force]
+#
+# 一台服务器可以对接多个设备组：用另一个组的对接命令再运行一次，会自动新增一个实例（oceand-g组号），
+# 和原来的互不影响。同一个组重复运行会跳过；--force = 这个组里重新注册一遍。
 #
 # 程序来源按顺序尝试，哪个成功用哪个：
 #   1. 当前目录 / 脚本所在目录里的 oceand-linux-<架构>（离线包就是这种情况）
@@ -16,13 +19,15 @@ KEY="${OCEAN_KEY:-}"
 NAME="${OCEAN_NAME:-$(hostname)}"
 NAME_SET="${OCEAN_NAME:+1}"
 MIRRORS="${OCEAN_MIRRORS:-}"
+FORCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -p|--panel) PANEL="${2:-}"; shift 2 ;;
     -k|--key) KEY="${2:-}"; shift 2 ;;
     -n|--name) NAME="${2:-}"; NAME_SET=1; shift 2 ;;
     -m|--mirrors) MIRRORS="${2:-}"; shift 2 ;;
-    *) echo "未知参数: $1（可用: -p 面板地址  -k 对接密钥  -n 节点名  -m 镜像地址）"; exit 1 ;;
+    -f|--force) FORCE="--force"; shift ;;
+    *) echo "未知参数: $1（可用: -p 面板地址  -k 对接密钥  -n 节点名  -m 镜像地址  --force 重新注册）"; exit 1 ;;
   esac
 done
 PANEL="${PANEL%/}"
@@ -162,28 +167,45 @@ if [ "${INSTALL_TOOLS:-0}" = "1" ]; then
   fi
 fi
 
-if [ "$INIT" = openrc ]; then rc-service oceand stop >/dev/null 2>&1 || true; else systemctl stop oceand 2>/dev/null || true; fi
-install -m 755 "$TMP" /usr/local/bin/oceand
-mkdir -p /etc/oceand
-chmod 700 /etc/oceand
-if ! /usr/local/bin/oceand register --panel "$PANEL" --key "$KEY" --name "$NAME"; then
+SRCBIN="$TMP"
+# ---- 装程序（先写临时文件再改名：别的实例正在运行也不受影响）
+CHANGED=1
+if [ -f /usr/local/bin/oceand ] && cmp -s "$SRCBIN" /usr/local/bin/oceand 2>/dev/null; then CHANGED=0; fi
+cp "$SRCBIN" /usr/local/bin/oceand.new && chmod 755 /usr/local/bin/oceand.new && mv -f /usr/local/bin/oceand.new /usr/local/bin/oceand || { echo "写入 /usr/local/bin/oceand 失败"; exit 1; }
+
+# ---- 注册。一台服务器可以对接多个设备组：密钥属于别的组时自动新增一个实例（oceand-g组号）
+INSTF="$(mktemp /tmp/oceand.inst.XXXXXX)"
+SUF=""
+/usr/local/bin/oceand register --panel "$PANEL" --key "$KEY" --name "$NAME" --multi --inst-out "$INSTF" $FORCE
+RC=$?
+if [ "$RC" = 2 ]; then # 很老的节点程序不认识 --multi：按老办法注册
+  /usr/local/bin/oceand register --panel "$PANEL" --key "$KEY" --name "$NAME" $FORCE; RC=$?
+else
+  SUF="$(cat "$INSTF" 2>/dev/null)"
+fi
+rm -f "$INSTF"
+if [ "$RC" != 0 ]; then
   echo "注册失败，请检查对接密钥是否正确（面板上重置过密钥的话要用新的）。"
   exit 1
 fi
+case "$SUF" in ""|-[A-Za-z0-9-]*) ;; *) SUF="" ;; esac
+SVC="oceand$SUF"
+DIR="/etc/oceand$SUF"
+mkdir -p "$DIR"; chmod 700 "$DIR"
 
 if [ "$INIT" = openrc ]; then
-cat > /etc/init.d/oceand <<'RC'
+cat > "/etc/init.d/$SVC" <<RC
 #!/sbin/openrc-run
-name="oceand"
+name="$SVC"
 description="ocean node service"
 command="/usr/local/bin/oceand"
 command_args="run"
 supervisor="supervise-daemon"
 respawn_delay=3
 respawn_max=0
-output_log="/var/log/oceand.log"
-error_log="/var/log/oceand.log"
-export OCEAN_DIR=/etc/oceand
+output_log="/var/log/$SVC.log"
+error_log="/var/log/$SVC.log"
+export OCEAN_DIR=$DIR
 
 depend() {
 	want net
@@ -192,21 +214,21 @@ depend() {
 
 start_pre() {
 	# 日志超过 5MB 就清空，免得一直变大
-	if [ -f /var/log/oceand.log ] && [ "$(wc -c < /var/log/oceand.log)" -gt 5242880 ]; then : > /var/log/oceand.log; fi
+	if [ -f /var/log/$SVC.log ] && [ "\$(wc -c < /var/log/$SVC.log)" -gt 5242880 ]; then : > /var/log/$SVC.log; fi
 }
 RC
-chmod 755 /etc/init.d/oceand
-rc-update add oceand default >/dev/null 2>&1
-rc-service oceand restart >/dev/null 2>&1 || rc-service oceand start
+chmod 755 "/etc/init.d/$SVC"
+rc-update add "$SVC" default >/dev/null 2>&1
+rc-service "$SVC" restart >/dev/null 2>&1 || rc-service "$SVC" start
 else
-cat > /etc/systemd/system/oceand.service <<'UNIT'
+cat > "/etc/systemd/system/$SVC.service" <<UNIT
 [Unit]
-Description=ocean node service
+Description=ocean node service ($SVC)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Environment=OCEAN_DIR=/etc/oceand
+Environment=OCEAN_DIR=$DIR
 ExecStart=/usr/local/bin/oceand run
 Restart=always
 RestartSec=3
@@ -217,31 +239,59 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable oceand >/dev/null 2>&1
-systemctl restart oceand
+systemctl enable "$SVC" >/dev/null 2>&1
+systemctl restart "$SVC"
+fi
+# 程序换了新版本：本机其他实例也重启一下，用上新程序
+if [ "$CHANGED" = 1 ]; then
+  for d in /etc/oceand /etc/oceand-*; do
+    [ -f "$d/state.json" ] || continue
+    o="$(basename "$d")"; [ "$o" = "$SVC" ] && continue
+    if [ "$INIT" = openrc ]; then rc-service "$o" restart >/dev/null 2>&1 || true; else systemctl restart "$o" 2>/dev/null || true; fi
+  done
 fi
 cat > /opt/oceand.uninstall.sh <<'UNI'
 #!/usr/bin/env bash
-if [ -f /etc/init.d/oceand ] && command -v rc-service >/dev/null 2>&1; then
-  rc-service oceand stop 2>/dev/null || true
-  rc-update del oceand default 2>/dev/null || true
-  rm -f /etc/init.d/oceand /var/log/oceand.log
+# 卸载本机全部 ocean 节点实例。只卸载其中一个：bash /opt/oceand.uninstall.sh oceand-g15
+ONLY="${1:-}"
+for d in /etc/oceand /etc/oceand-*; do
+  [ -d "$d" ] || continue
+  s="$(basename "$d")"
+  [ -n "$ONLY" ] && [ "$s" != "$ONLY" ] && continue
+  if [ -f "/etc/init.d/$s" ] && command -v rc-service >/dev/null 2>&1; then
+    rc-service "$s" stop 2>/dev/null || true
+    rc-update del "$s" default 2>/dev/null || true
+    rm -f "/etc/init.d/$s" "/var/log/$s.log"
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now "$s" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$s.service"
+  fi
+  rm -rf "$d"
+  echo "已卸载 $s"
+done
+command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
+LEFT=0
+for f in /etc/oceand/state.json /etc/oceand-*/state.json; do [ -f "$f" ] && LEFT=1; done
+if [ "$LEFT" = 0 ]; then
+  rm -f /usr/local/bin/oceand /usr/local/bin/oceand.new*
+  rm -f /opt/oceand.uninstall.sh
+  echo "ocean 已卸载"
 fi
-if command -v systemctl >/dev/null 2>&1; then
-  systemctl disable --now oceand 2>/dev/null || true
-  rm -f /etc/systemd/system/oceand.service
-  systemctl daemon-reload 2>/dev/null || true
-fi
-rm -f /usr/local/bin/oceand /usr/local/bin/oceand.new
-rm -rf /etc/oceand
-rm -f /opt/oceand.uninstall.sh
-echo "ocean 已卸载"
 UNI
 chmod 755 /opt/oceand.uninstall.sh
-if [ -f /etc/init.d/oceand ] && ! [ -d /run/systemd/system ]; then echo "安装成功。查看日志: tail -f /var/log/oceand.log"; else echo "安装成功。查看日志: journalctl -fu oceand"; fi
-echo "如需卸载，请运行以下命令："
-echo "bash /opt/oceand.uninstall.sh"
+if [ "$INIT" = openrc ]; then echo "安装成功（$SVC）。查看日志: tail -f /var/log/$SVC.log"; else echo "安装成功（$SVC）。查看日志: journalctl -fu $SVC"; fi
+N_INST=0
+for f in /etc/oceand/state.json /etc/oceand-*/state.json; do [ -f "$f" ] && N_INST=$((N_INST+1)); done
+if [ "$N_INST" -gt 1 ]; then
+  echo "本机现在对接了 $N_INST 个设备组。只卸载这一个: bash /opt/oceand.uninstall.sh $SVC"
+  echo "全部卸载: bash /opt/oceand.uninstall.sh"
+else
+  echo "如需卸载，请运行以下命令："
+  echo "bash /opt/oceand.uninstall.sh"
+fi
 echo
 echo "tcp_congestion_control:  $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)   default_qdisc: $(sysctl -n net.core.default_qdisc 2>/dev/null)"
 BBRV="$(modinfo tcp_bbr 2>/dev/null | awk -F': *' '/^version/{print $2}')"
-[ -n "$BBRV" ] && echo "tcp_bbr 模块版本: $BBRV（1 = BBRv1；BBRv3 需要 XanMod 等带 BBRv3 的内核）"
+if [ -n "$BBRV" ]; then echo "tcp_bbr 模块版本: $BBRV（1 = BBRv1；BBRv3 需要 XanMod 等带 BBRv3 的内核）"; fi
+exit 0
